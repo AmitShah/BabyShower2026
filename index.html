@@ -320,8 +320,8 @@
     <label class="control">Blast vectors
       <input id="blastDebug" type="checkbox">
     </label>
-    <label class="control">Tap explosion
-      <input id="tapExplodeEnabled" type="checkbox" checked>
+    <label class="control">Tap/click explosion
+      <input id="tapExplosionEnabled" type="checkbox" checked>
     </label>
     <label class="control">Screen shake
       <input id="screenShakeEnabled" type="checkbox" checked>
@@ -476,7 +476,7 @@ let clearColor='#dff5ff';
 let skyGradientEnabled=false, skyGradientA='#c8efff', skyGradientB='#c8efff', skyGradientAngle=90;
 let waterGradientEnabled=true, waterGradientA='#7ad5ff', waterGradientB='#00aeff', waterGradientAngle=90;
 let spawnDuration=250, spawnCircleScale=1, poolHeightPct=33, randomSpawn=false;
-let blastEnabled=true, blastRadius=220, blastForce=18, blastDebug=false, tapExplodeEnabled=true;
+let blastEnabled=true, blastRadius=220, blastForce=18, blastDebug=false;
 let blastDebugEvents=[];
 let impactFxScale=4.0, impactColorA='#ffffff', impactColorB='#000000', impactFlashColor='#ffffff';
 let activeImpactCircles=[];
@@ -539,6 +539,7 @@ let postEnabled=true, bloomEnabled=true, noiseEnabled=true;
 let noiseAmount=.240, noiseSpeed=4.0, scanlineAmount=.185;
 let dragBody=null, dragWasStatic=false, pointerId=null;
 let tapPointerId=null, tapStartX=0, tapStartY=0, tapStartAt=0, tapMoved=false;
+let tapExplosionEnabled=true;
 const TAP_EXPLODE_MAX_MOVE=12;
 const TAP_EXPLODE_MAX_MS=350;
 
@@ -2916,6 +2917,7 @@ function clearImpactEffects(){
 
 function triggerTapExplosion(contact){
   if(
+    !tapExplosionEnabled ||
     !contact ||
     !Number.isFinite(contact.x) ||
     !Number.isFinite(contact.y) ||
@@ -3562,7 +3564,7 @@ function bindPointer() {
       dragBody=null;
     }
 
-    if(wasTap && tapExplodeEnabled){
+    if(wasTap){
       triggerTapExplosion(eventToMatter(ev));
     }
 
@@ -3672,6 +3674,7 @@ function bindControls() {
   const blastRadiusEl=document.getElementById('blastRadius');
   const blastForceEl=document.getElementById('blastForce');
   const blastDebugEl=document.getElementById('blastDebug');
+const tapExplosionEnabledEl=document.getElementById('tapExplosionEnabled');
   const blastRadiusv=document.getElementById('blastRadiusv');
   const blastForcev=document.getElementById('blastForcev');
   const impactFxScaleEl=document.getElementById('impactFxScale');
@@ -3867,7 +3870,7 @@ function bindControls() {
     blastRadius=Number(blastRadiusEl.value);
     blastForce=Number(blastForceEl.value);
     blastDebug=blastDebugEl.checked;
-    tapExplodeEnabled=tapExplodeEnabledEl.checked;
+tapExplosionEnabled=tapExplosionEnabledEl.checked;
     impactFxScale=Number(impactFxScaleEl.value);
     impactColorA=impactColorAEl.value;
     impactColorB=impactColorBEl.value;
@@ -3925,7 +3928,7 @@ function bindControls() {
     circleSizev.textContent=spawnCircleScale.toFixed(2);
   };
 
-  [amp,speed,buoy,poolHeight,cameraZoomEl,counterOffsetXEl,counterOffsetYEl,counterFontColorEl,counterOpacityEl,counterFontSizeEl,titleFontColorEl,titleOpacityEl,titleFontSizeEl,titleXOffsetEl,titleYOffsetEl,clearColorEl,skyGradientEnabledEl,skyGradientAEl,skyGradientBEl,skyGradientAngleEl,waterOpacityEl,waterGradientEnabledEl,waterGradientAEl,waterGradientBEl,waterGradientAngleEl,poolBorderColorEl,poolTilesEnabledEl,poolTileSizeEl,poolBorderHeightEl,poolTopBorderColorEl,poolTopBorderHeightEl,poolTopBorderYOffsetEl,reflectionEnabledEl,reflectionOpacityEl,reflectionFpsEl,reflectionYOffsetEl,reflectionYScaleEl,reflectionChromaEnabledEl,reflectionChromaOffsetEl,reflectionChromaIntensityEl,waterNoiseEnabledEl,waterNoiseScaleEl,waterNoiseSpeedEl,causticsEnabledEl,causticsOpacityEl,causticsDepthMaskEl,causticsMaskStartEl,causticsMaskPowerEl,causticsScaleEl,causticsThicknessEl,spawnMs,circleSize,randomSpawnEl,blastEnabledEl,blastRadiusEl,blastForceEl,blastDebugEl,tapExplodeEnabledEl,impactFxScaleEl,impactColorAEl,impactColorBEl,impactFlashColorEl,screenShakeEnabledEl,screenShakeIntensityEl,screenShakeDurationEl,fxSelect,fxColorEl,fxOffsetXEl,fxOffsetYEl,fxScaleEl,fxFrameMsEl,fxDownBiasEl,fxAnchorDebugEl,labelOffsetXEl,labelOffsetYEl,labelFontSizeEl].forEach(el=>{
+  [amp,speed,buoy,poolHeight,cameraZoomEl,counterOffsetXEl,counterOffsetYEl,counterFontColorEl,counterOpacityEl,counterFontSizeEl,titleFontColorEl,titleOpacityEl,titleFontSizeEl,titleXOffsetEl,titleYOffsetEl,clearColorEl,skyGradientEnabledEl,skyGradientAEl,skyGradientBEl,skyGradientAngleEl,waterOpacityEl,waterGradientEnabledEl,waterGradientAEl,waterGradientBEl,waterGradientAngleEl,poolBorderColorEl,poolTilesEnabledEl,poolTileSizeEl,poolBorderHeightEl,poolTopBorderColorEl,poolTopBorderHeightEl,poolTopBorderYOffsetEl,reflectionEnabledEl,reflectionOpacityEl,reflectionFpsEl,reflectionYOffsetEl,reflectionYScaleEl,reflectionChromaEnabledEl,reflectionChromaOffsetEl,reflectionChromaIntensityEl,waterNoiseEnabledEl,waterNoiseScaleEl,waterNoiseSpeedEl,causticsEnabledEl,causticsOpacityEl,causticsDepthMaskEl,causticsMaskStartEl,causticsMaskPowerEl,causticsScaleEl,causticsThicknessEl,spawnMs,circleSize,randomSpawnEl,blastEnabledEl,blastRadiusEl,blastForceEl,blastDebugEl,tapExplosionEnabledEl,impactFxScaleEl,impactColorAEl,impactColorBEl,impactFlashColorEl,screenShakeEnabledEl,screenShakeIntensityEl,screenShakeDurationEl,fxSelect,fxColorEl,fxOffsetXEl,fxOffsetYEl,fxScaleEl,fxFrameMsEl,fxDownBiasEl,fxAnchorDebugEl,labelOffsetXEl,labelOffsetYEl,labelFontSizeEl].forEach(el=>{
     el.addEventListener('input',sync);
     el.addEventListener('change',sync);
   });
