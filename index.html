@@ -259,6 +259,9 @@
     <label class="control">Reflection FPS
       <input id="reflectionFps" type="range" min="10" max="60" step="5" value="30"><span id="reflectionFpsv">30</span>
     </label>
+    <label class="control">Reflection resolution
+      <input id="reflectionResolutionScale" type="range" min=".25" max="1" step=".05" value=".50"><span id="reflectionResolutionScalev">50</span>%
+    </label>
     <label class="control">Reflection Y offset
       <input id="reflectionYOffset" type="range" min="-120" max="120" step="1" value="-20"><span id="reflectionYOffsetv">-20</span>
     </label>
@@ -384,13 +387,25 @@
       <input id="labelFontSize" type="range" min="6" max="28" step="1" value="13"><span id="labelFontSizev">13</span>
     </label>
     <button id="testFx">Test selected FX</button>
-    <label class="control">Poll baby endpoint
+    <label class="control">Continuous endpoint polling
       <input id="babyEndpointPolling" type="checkbox">
     </label>
-    <label class="control">Poll interval (ms)
+    <label class="control">Retry / poll interval (ms)
       <input id="babyEndpointPollMs" type="range" min="250" max="10000" step="250" value="2000"><span id="babyEndpointPollMsv">2000</span>
     </label>
-    <span class="badge" id="babyEndpointStatus">poll off</span>
+    <label class="control">Fetch text X
+      <input id="fetchTextX" type="range" min="0" max="500" step="1" value="24"><span id="fetchTextXv">24</span>
+    </label>
+    <label class="control">Fetch text Y
+      <input id="fetchTextY" type="range" min="0" max="500" step="1" value="24"><span id="fetchTextYv">24</span>
+    </label>
+    <label class="control">Fetch text size
+      <input id="fetchTextSize" type="range" min="12" max="160" step="1" value="25"><span id="fetchTextSizev">25</span>
+    </label>
+    <label class="control">Fetch text scale
+      <input id="fetchTextScale" type="range" min=".25" max="3" step=".05" value=".50"><span id="fetchTextScalev">0.50</span>×
+    </label>
+    <span class="badge" id="babyEndpointStatus">single fetch ready</span>
     <button class="primary" id="add">+ baby</button>
     <button id="spawnGrid">spawn starter grid</button>
     <button id="reset">reset</button>
@@ -529,9 +544,19 @@ let debug=false;
 const BABY_GUESS_ENDPOINT='https://script.google.com/macros/s/AKfycbzWgA2olSef0Tp2UEInGEPAEB3RAjvV-gwENKiCAC-wszCO2z99wVcvmmePw_TeojNiuQ/exec';
 let babyGuessPollMs=2000;
 let babyEndpointPolling=false;
+let babyEndpointContinuous=false;
 let babyEndpointTimer=null;
 let babyEndpointBusy=false;
+let nextEndpointFetchAt=-Infinity;
+let endpointFetchStarted=false;
+let endpointFetchSucceeded=false;
 let lastSpawnedGuessId=null;
+
+let fetchTextMesh=null, fetchTextBBox=null, fetchTextLast='';
+let fetchTextX=24, fetchTextY=24, fetchTextSize=25, fetchTextScale=.50;
+let fetchTextMode='hidden';
+const FETCH_TEXT_FLASH_MS=300;
+const BABY_ENDPOINT_TIMEOUT_MS=20000;
 
 const pendingBabyGuesses=[];
 const BABY_ENDPOINT_SPAWN_BUDGET_MS=35;
@@ -556,7 +581,7 @@ let sharedBabyLabelGeometry=null;
 let renderer, scene, impactOverlayScene, camera, waterMesh, crestLine, deckMesh, skyMesh, poolBorderMesh, poolTopBorderMesh, causticsMesh;
 let reflectionTarget, reflectionPlane;
 let reflectionEnabled=true, reflectionOpacity=.32, reflectionYOffset=-20, reflectionYScale=.72;
-let reflectionFps=30, lastReflectionCaptureAt=-Infinity;
+let reflectionFps=30, reflectionResolutionScale=.50, lastReflectionCaptureAt=-Infinity;
 let sharedWaterGeometry=null, waterRenderSegments=0;
 let waterRenderPositions=null, waterRenderSurfaceY=null, waterRenderX=null;
 let crestRenderPositions=null, crestPositionAttribute=null;
@@ -1447,13 +1472,124 @@ function getOptionsActionAtClientPoint(clientX,clientY){
   return null;
 }
 
+
+function disposeFetchTextGeometry(){
+  if(fetchTextMesh?.geometry) fetchTextMesh.geometry.dispose();
+}
+
+function setFetchText(text,mode='loading'){
+  fetchTextMode=mode;
+  const next=String(text ?? '');
+  if(next===fetchTextLast && fetchTextMesh) return;
+  fetchTextLast=next;
+
+  if(!fetchTextMesh){
+    fetchTextMesh=new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({
+        color:new THREE.Color(optionsFontColor),
+        transparent:true,
+        opacity:1,
+        depthTest:false,
+        depthWrite:false,
+        toneMapped:false
+      })
+    );
+    fetchTextMesh.position.z=49;
+    // Above QR/instructions, counter and option meshes whenever visible.
+    fetchTextMesh.renderOrder=1030;
+    scene.add(fetchTextMesh);
+  }
+
+  disposeFetchTextGeometry();
+  const geometry=new TextGeometry(next,{
+    font:joinNowFont,
+    size:Math.max(1,fetchTextSize),
+    depth:Math.max(.3,fetchTextSize*.018),
+    curveSegments:1,
+    bevelEnabled:false
+  });
+  geometry.computeBoundingBox();
+  fetchTextMesh.geometry=geometry;
+  fetchTextBBox=geometry.boundingBox?.clone() ?? null;
+  fetchTextMesh.visible=fetchTextMode!=='hidden';
+  updateFetchTextTransform();
+}
+
+function updateFetchTextTransform(){
+  if(!fetchTextMesh || !fetchTextBBox || !camera) return;
+
+  const invZoom=1/Math.max(camera.zoom,.0001);
+  const viewCenterX=camera.position.x+(camera.left+camera.right)*.5;
+  const viewCenterY=camera.position.y+(camera.top+camera.bottom)*.5;
+  const halfViewW=(camera.right-camera.left)*.5*invZoom;
+  const halfViewH=(camera.top-camera.bottom)*.5*invZoom;
+  const viewLeft=viewCenterX-halfViewW;
+  const viewTop=viewCenterY+halfViewH;
+  const s=invZoom*Math.max(.01,fetchTextScale);
+
+  // X/Y are screen-like pixel offsets from the visible top-left corner.
+  fetchTextMesh.scale.set(s,s,s);
+  fetchTextMesh.position.x=viewLeft+fetchTextX*invZoom-(fetchTextBBox.min.x*s);
+  fetchTextMesh.position.y=viewTop-fetchTextY*invZoom-(fetchTextBBox.max.y*s);
+  fetchTextMesh.position.z=49;
+}
+
+function updateFetchTextOverlay(now){
+  if(!fetchTextMesh || fetchTextMode==='hidden') return;
+
+  updateFetchTextTransform();
+
+  if(fetchTextMode==='loading' || fetchTextMode==='error'){
+    const pulse=.22+.78*(.5+.5*Math.sin(now*Math.PI*2/FETCH_TEXT_FLASH_MS));
+    fetchTextMesh.material.opacity=pulse;
+  }else{
+    fetchTextMesh.material.opacity=1;
+  }
+}
+
+function scheduleNextEndpointFetch(delayMs=babyGuessPollMs){
+  if(babyEndpointTimer){
+    clearTimeout(babyEndpointTimer);
+    babyEndpointTimer=null;
+  }
+  if(!babyEndpointPolling) return;
+
+  const delay=Math.max(0,Number(delayMs)||0);
+  nextEndpointFetchAt=performance.now()+delay;
+  if(fetchTextMode!=='error') setFetchText('LOADING ...','loading');
+
+  babyEndpointTimer=setTimeout(()=>{
+    babyEndpointTimer=null;
+    pollBabyEndpointOnce();
+  },delay);
+}
+
+function startBabyEndpointLoad(){
+  if(babyEndpointTimer){
+    clearTimeout(babyEndpointTimer);
+    babyEndpointTimer=null;
+  }
+  babyEndpointPolling=true;
+  babyEndpointContinuous=!!document.getElementById('babyEndpointPolling')?.checked;
+  endpointFetchStarted=true;
+  endpointFetchSucceeded=false;
+  nextEndpointFetchAt=performance.now();
+
+  const status=document.getElementById('babyEndpointStatus');
+  if(status) status.textContent=babyEndpointContinuous?'polling…':'loading once…';
+
+  setFetchText('LOADING ...','loading');
+  pollBabyEndpointOnce();
+}
+
 function clearOptionsOverlayAndStartPolling(){
   optionsOverlayActive=false;
   if(optionsOverlayGroup) optionsOverlayGroup.visible=false;
 
-  const pollToggle=document.getElementById('babyEndpointPolling');
-  if(pollToggle) pollToggle.checked=true;
-  startBabyEndpointPolling();
+  // Default behavior is one load after either option is chosen.
+  // The debug checkbox only opts into continuous polling.
+  startBabyEndpointLoad();
 }
 
 function activateOptionsAction(action){
@@ -1769,8 +1905,8 @@ initImpactFlashBatches();
 
   // Offscreen capture used by the 2D reflection plane.
   reflectionTarget=new THREE.WebGLRenderTarget(
-    Math.max(1,Math.floor(W*renderer.getPixelRatio())),
-    Math.max(1,Math.floor(H*renderer.getPixelRatio())),
+    Math.max(1,Math.floor(W*renderer.getPixelRatio()*reflectionResolutionScale)),
+    Math.max(1,Math.floor(H*renderer.getPixelRatio()*reflectionResolutionScale)),
     {
       minFilter:THREE.LinearFilter,
       magFilter:THREE.LinearFilter,
@@ -1830,14 +1966,15 @@ function resize() {
   if(reflectionTarget){
     const rp=renderer.getPixelRatio();
     reflectionTarget.setSize(
-      Math.max(1,Math.floor(W*rp)),
-      Math.max(1,Math.floor(H*rp))
+      Math.max(1,Math.floor(W*rp*reflectionResolutionScale)),
+      Math.max(1,Math.floor(H*rp*reflectionResolutionScale))
     );
   }
   camera.left=0; camera.right=W; camera.top=H; camera.bottom=0;
   camera.updateProjectionMatrix();
   updateQrSpriteLayout();
   updateOptionsOverlayTransform();
+  updateFetchTextTransform();
   if(nowOutsideShake()) camera.position.set(CAMERA_BASE_X,CAMERA_BASE_Y,CAMERA_BASE_Z);
 
   // Pool height is user-controlled. waterBase is the surface measured from the top.
@@ -2482,12 +2619,24 @@ function linearMapClamped(value,inMin,inMax,outMin,outMax){
 }
 
 function parseBabyWeightOz(value){
+  // New Apps Script returns a quantized pounds bucket (5..10).
+  // Convert that data value to ounces for the existing visual scale logic.
+  if(typeof value==='number' && Number.isFinite(value)){
+    return value*16;
+  }
+
   const s=String(value ?? '')
     .toLowerCase()
     .replace(/\s+/g,' ')
     .trim();
 
-  // Handles "6lb 2 oz", "6 lb 2oz", "5lb 0z", etc.
+  // Also accept numeric strings from JSON/Sheets, e.g. "7".
+  if(/^\d+(?:\.\d+)?$/.test(s)){
+    const lb=Number(s);
+    return Number.isFinite(lb) ? lb*16 : null;
+  }
+
+  // Backward-compatible with the previous "6lb 2 oz" payload.
   const m=s.match(/(\d+(?:\.\d+)?)\s*lb(?:s)?\s*(\d+(?:\.\d+)?)?\s*(?:oz|0z)?/i);
   if(!m) return null;
 
@@ -2584,47 +2733,85 @@ function processPendingBabyGuesses(now){
   lastEndpointSpawnAt=now;
 
   const status=document.getElementById('babyEndpointStatus');
-  if(status && babyEndpointPolling){
-    status.textContent=pendingBabyGuesses.length
-      ? `queued ${pendingBabyGuesses.length}`
-      : 'waiting';
+  if(status && pendingBabyGuesses.length){
+    status.textContent=`queued ${pendingBabyGuesses.length}`;
   }
 }
 
 async function pollBabyEndpointOnce(){
   if(!babyEndpointPolling || babyEndpointBusy) return;
   babyEndpointBusy=true;
+  nextEndpointFetchAt=-Infinity;
 
   const status=document.getElementById('babyEndpointStatus');
+  const controller=new AbortController();
+  const timeoutId=setTimeout(
+    ()=>controller.abort('Apps Script request timed out'),
+    BABY_ENDPOINT_TIMEOUT_MS
+  );
 
   try{
-    if(status) status.textContent='polling…';
+    if(status) status.textContent='fetching…';
+    setFetchText('LOADING ...','loading');
 
     const response=await fetch(BABY_GUESS_ENDPOINT,{
       method:'GET',
       cache:'no-store',
       redirect:'follow',
-      headers:{'Accept':'application/json'}
+      headers:{'Accept':'application/json'},
+      signal:controller.signal
     });
 
+    const responseText=await response.text();
+    const responseMeta={
+      status:response.status,
+      statusText:response.statusText,
+      ok:response.ok,
+      redirected:response.redirected,
+      finalUrl:response.url,
+      contentType:response.headers.get('content-type'),
+      bodyPreview:responseText.slice(0,2000)
+    };
+
     if(!response.ok){
-      throw new Error(`HTTP ${response.status}`);
+      const error=new Error(`Apps Script HTTP ${response.status} ${response.statusText}`.trim());
+      error.endpointDetails=responseMeta;
+      throw error;
     }
 
-    const payload=await response.json();
+    let payload;
+    try{
+      payload=JSON.parse(responseText);
+    }catch(parseError){
+      const error=new Error(`Apps Script returned non-JSON: ${parseError.message}`);
+      error.endpointDetails={...responseMeta,parseError:String(parseError)};
+      throw error;
+    }
 
-    // Support either a single latest guess object or an array of guesses.
-    const guesses=Array.isArray(payload) ? payload : [payload];
+    if(response.redirected){
+      console.debug('Apps Script redirect followed successfully:',responseMeta);
+    }
+
+    if(payload && !Array.isArray(payload) && payload.ok===false){
+      const error=new Error(`Apps Script error: ${payload.error || 'unknown server error'}`);
+      error.endpointDetails={...responseMeta,serverPayload:payload};
+      throw error;
+    }
+
+    const guesses=Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.rows)
+        ? payload.rows
+        : (payload && typeof payload==='object' && 'id' in payload)
+          ? [payload]
+          : [];
+
     const valid=guesses
       .filter(g=>g && typeof g==='object')
       .sort((a,b)=>(Number(a.id)||0)-(Number(b.id)||0));
 
     let queued=0;
-
     for(const guess of valid){
-      const idKey=getGuessIdKey(guess);
-
-      // For arrays, ignore records older than the most recently spawned numeric id.
       if(
         lastSpawnedGuessId!==null &&
         Number.isFinite(Number(lastSpawnedGuessId)) &&
@@ -2637,39 +2824,74 @@ async function pollBabyEndpointOnce(){
       if(queueBabyGuess(guess)) queued++;
     }
 
-    if(status){
-      status.textContent=queued
-        ? `queued ${queued}`
-        : (pendingBabyGuesses.length ? `queued ${pendingBabyGuesses.length}` : 'waiting');
+    endpointFetchSucceeded=true;
+
+    if(babyEndpointContinuous){
+      if(status){
+        status.textContent=queued
+          ? `queued ${queued}; next poll`
+          : 'loaded; next poll';
+      }
+      scheduleNextEndpointFetch(babyGuessPollMs);
+    }else{
+      babyEndpointPolling=false;
+      if(babyEndpointTimer){
+        clearTimeout(babyEndpointTimer);
+        babyEndpointTimer=null;
+      }
+      nextEndpointFetchAt=-Infinity;
+      if(status) status.textContent=queued ? `loaded; queued ${queued}` : 'loaded';
+      setFetchText('REFRESH FOR UPDATES','success');
     }
   }catch(err){
-    console.error('Baby endpoint poll failed:',err);
-    if(status) status.textContent='poll error';
+    const details={
+      name:err?.name,
+      message:err?.message,
+      stack:err?.stack,
+      cause:err?.cause,
+      endpoint:BABY_GUESS_ENDPOINT,
+      timeoutMs:BABY_ENDPOINT_TIMEOUT_MS,
+      ...(err?.endpointDetails ? {response:err.endpointDetails} : {})
+    };
+    console.error('Apps Script fetch failed — unpacked details:',details,err);
+
+    if(status){
+      status.textContent=err?.name==='AbortError'
+        ? 'timeout; retry scheduled'
+        : 'endpoint error; retry scheduled';
+    }
+    setFetchText('ERROR ... RETRYING','error');
+
+    if(babyEndpointPolling){
+      scheduleNextEndpointFetch(babyGuessPollMs);
+    }
   }finally{
+    clearTimeout(timeoutId);
     babyEndpointBusy=false;
   }
 }
 
 function startBabyEndpointPolling(){
-  if(babyEndpointTimer) clearInterval(babyEndpointTimer);
-  babyEndpointPolling=true;
-
-  const status=document.getElementById('babyEndpointStatus');
-  if(status) status.textContent='polling…';
-
-  // Poll immediately, then every 2 seconds.
-  pollBabyEndpointOnce();
-  babyEndpointTimer=setInterval(pollBabyEndpointOnce,babyGuessPollMs);
+  // Kept as a compatibility/debug entry point: checking the toggle explicitly
+  // opts into continuous polling.
+  babyEndpointContinuous=true;
+  const toggle=document.getElementById('babyEndpointPolling');
+  if(toggle) toggle.checked=true;
+  startBabyEndpointLoad();
 }
 
 function stopBabyEndpointPolling(){
   babyEndpointPolling=false;
+  babyEndpointContinuous=false;
   if(babyEndpointTimer){
-    clearInterval(babyEndpointTimer);
+    clearTimeout(babyEndpointTimer);
     babyEndpointTimer=null;
   }
+  nextEndpointFetchAt=-Infinity;
   const status=document.getElementById('babyEndpointStatus');
-  if(status) status.textContent='poll off';
+  if(status) status.textContent='single fetch ready';
+  if(endpointFetchSucceeded) setFetchText('REFRESH FOR UPDATES','success');
+  else if(fetchTextMesh) fetchTextMesh.visible=false;
 }
 
 function addBaby(x=null, y=null, forcedSpriteIndex=null, countCreation=true, explicitLabel=null) {
@@ -2777,9 +2999,9 @@ function resetBabies() {
   lastEndpointSpawnAt=-Infinity;
 
   const status=document.getElementById('babyEndpointStatus');
-  if(status && babyEndpointPolling) status.textContent='ready to regenerate';
+  if(status && endpointFetchStarted) status.textContent='ready to regenerate';
 
-  if(babyEndpointPolling) pollBabyEndpointOnce();
+  if(endpointFetchStarted) startBabyEndpointLoad();
 }
 
 function spawnStarterGrid() {
@@ -3934,6 +4156,8 @@ function bindControls() {
   const reflectionOpacityEl=document.getElementById('reflectionOpacity');
   const reflectionFpsEl=document.getElementById('reflectionFps');
   const reflectionFpsv=document.getElementById('reflectionFpsv');
+  const reflectionResolutionScaleEl=document.getElementById('reflectionResolutionScale');
+  const reflectionResolutionScalev=document.getElementById('reflectionResolutionScalev');
   const reflectionYOffsetEl=document.getElementById('reflectionYOffset');
   const reflectionYScaleEl=document.getElementById('reflectionYScale');
   const reflectionChromaEnabledEl=document.getElementById('reflectionChromaEnabled');
@@ -4273,6 +4497,19 @@ tapExplosionEnabled=tapExplosionEnabledEl.checked;
     lastReflectionCaptureAt=-Infinity;
   });
 
+  reflectionResolutionScaleEl.addEventListener('input',()=>{
+    reflectionResolutionScale=Number(reflectionResolutionScaleEl.value);
+    reflectionResolutionScalev.textContent=String(Math.round(reflectionResolutionScale*100));
+    if(reflectionTarget && renderer){
+      const rp=renderer.getPixelRatio();
+      reflectionTarget.setSize(
+        Math.max(1,Math.floor(W*rp*reflectionResolutionScale)),
+        Math.max(1,Math.floor(H*rp*reflectionResolutionScale))
+      );
+      lastReflectionCaptureAt=-Infinity;
+    }
+  });
+
   clearColorEl.addEventListener('input',()=>{
     clearColor=clearColorEl.value;
     if(renderer) renderer.setClearColor(clearColor,1);
@@ -4431,22 +4668,70 @@ tapExplosionEnabled=tapExplosionEnabledEl.checked;
   const babyEndpointPollingEl=document.getElementById('babyEndpointPolling');
   const babyEndpointPollMsEl=document.getElementById('babyEndpointPollMs');
   const babyEndpointPollMsv=document.getElementById('babyEndpointPollMsv');
+  const fetchTextXEl=document.getElementById('fetchTextX');
+  const fetchTextXv=document.getElementById('fetchTextXv');
+  const fetchTextYEl=document.getElementById('fetchTextY');
+  const fetchTextYv=document.getElementById('fetchTextYv');
+  const fetchTextSizeEl=document.getElementById('fetchTextSize');
+  const fetchTextSizev=document.getElementById('fetchTextSizev');
+  const fetchTextScaleEl=document.getElementById('fetchTextScale');
+  const fetchTextScalev=document.getElementById('fetchTextScalev');
 
   babyEndpointPollMsEl.addEventListener('input',()=>{
     babyGuessPollMs=Number(babyEndpointPollMsEl.value);
     babyEndpointPollMsv.textContent=String(Math.round(babyGuessPollMs));
 
-    // If polling is already enabled, restart the interval immediately with the
-    // new cadence without interrupting rendering or clearing queued babies.
-    if(babyEndpointPolling){
-      if(babyEndpointTimer) clearInterval(babyEndpointTimer);
-      babyEndpointTimer=setInterval(pollBabyEndpointOnce,babyGuessPollMs);
+    // Re-arm only a scheduled retry/poll. An in-flight fetch is never overlapped.
+    if(babyEndpointPolling && babyEndpointTimer){
+      scheduleNextEndpointFetch(babyGuessPollMs);
     }
   });
 
   babyEndpointPollingEl.addEventListener('change',()=>{
-    if(babyEndpointPollingEl.checked) startBabyEndpointPolling();
-    else stopBabyEndpointPolling();
+    babyEndpointContinuous=babyEndpointPollingEl.checked;
+    if(!endpointFetchStarted) return;
+
+    if(babyEndpointContinuous){
+      // If the one-shot already succeeded, start polling from now.
+      if(!babyEndpointPolling){
+        babyEndpointPolling=true;
+        scheduleNextEndpointFetch(babyGuessPollMs);
+      }
+    }else if(endpointFetchSucceeded){
+      // Return to default single-fetch semantics after a successful load.
+      babyEndpointPolling=false;
+      if(babyEndpointTimer){
+        clearTimeout(babyEndpointTimer);
+        babyEndpointTimer=null;
+      }
+      nextEndpointFetchAt=-Infinity;
+      setFetchText('REFRESH FOR UPDATES','success');
+      const status=document.getElementById('babyEndpointStatus');
+      if(status) status.textContent='loaded';
+    }
+  });
+
+  const syncFetchTextLayout=()=>{
+    const sizeChanged=fetchTextSize!==Number(fetchTextSizeEl.value);
+    fetchTextX=Number(fetchTextXEl.value);
+    fetchTextY=Number(fetchTextYEl.value);
+    fetchTextSize=Number(fetchTextSizeEl.value);
+    fetchTextScale=Number(fetchTextScaleEl.value);
+    fetchTextXv.textContent=String(Math.round(fetchTextX));
+    fetchTextYv.textContent=String(Math.round(fetchTextY));
+    fetchTextSizev.textContent=String(Math.round(fetchTextSize));
+    fetchTextScalev.textContent=fetchTextScale.toFixed(2);
+    if(sizeChanged && fetchTextMesh){
+      const current=fetchTextLast;
+      fetchTextLast='';
+      setFetchText(current,fetchTextMode);
+    }else{
+      updateFetchTextTransform();
+    }
+  };
+  [fetchTextXEl,fetchTextYEl,fetchTextSizeEl,fetchTextScaleEl].forEach(el=>{
+    el.addEventListener('input',syncFetchTextLayout);
+    el.addEventListener('change',syncFetchTextLayout);
   });
 
   document.getElementById('add').addEventListener('click',()=>{
@@ -4604,7 +4889,7 @@ function loop(now) {
   updateImpactEffects(now);
   updateSelectedFX(now);
 
-  if(babyEndpointPolling) processPendingBabyGuesses(now);
+  if(pendingBabyGuesses.length) processPendingBabyGuesses(now);
 
   if(reflectionPlane) reflectionPlane.material.uniforms.time.value=now/1000;
   if(causticsMesh) causticsMesh.material.uniforms.time.value=now/1000;
@@ -4614,6 +4899,7 @@ function loop(now) {
   updatePoolTitleWave();
   updateOptionsOverlayTransform();
   updateOptionsOverlayFlash(now);
+  updateFetchTextOverlay(now);
 
   if(noisePass) noisePass.uniforms.time.value += (frameMs/1000)*noiseSpeed;
 
@@ -4627,12 +4913,14 @@ function loop(now) {
     const crestWasVisible=crestLine.visible;
     const causticsWereVisible=causticsMesh?.visible ?? false;
     const optionsWereVisible=optionsOverlayGroup?.visible ?? false;
+    const fetchTextWasVisible=fetchTextMesh?.visible ?? false;
 
     reflectionPlane.visible=false;
     waterMesh.visible=false;
     crestLine.visible=false;
     if(causticsMesh) causticsMesh.visible=false;
     if(optionsOverlayGroup) optionsOverlayGroup.visible=false;
+    if(fetchTextMesh) fetchTextMesh.visible=false;
 
     renderer.setRenderTarget(reflectionTarget);
     renderer.clear();
@@ -4644,6 +4932,7 @@ function loop(now) {
     crestLine.visible=crestWasVisible;
     if(causticsMesh) causticsMesh.visible=causticsWereVisible;
     if(optionsOverlayGroup) optionsOverlayGroup.visible=optionsWereVisible;
+    if(fetchTextMesh) fetchTextMesh.visible=fetchTextWasVisible;
   }
 
   if(postEnabled){
